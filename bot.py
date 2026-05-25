@@ -1,54 +1,36 @@
 import telebot
 import sqlite3
 import os
-from telebot import types
 
-# --- إعدادات USDT (Tron) ---
-from tronpy import Tron
-from tronpy.keys import PrivateKey
-from tronpy.providers import HTTPProvider
-
-# --- إعدادات الشام كاش ---
-from shamcash import ShamCashAPISync
-
-# ==================== الإعدادات ====================
+# ------------------ الإعدادات ------------------
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
-
-# USDT
-TRON_PRIVATE_KEY = os.environ.get('TRON_PRIVATE_KEY')
-TRON_WALLET_ADDRESS = os.environ.get('TRON_WALLET_ADDRESS')
-USDT_CONTRACT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'
-
-# شام كاش
-SHAMCASH_API_TOKEN = os.environ.get('SHAMCASH_API_TOKEN')
-SHAMCASH_ACCOUNT_ID = os.environ.get('SHAMCASH_ACCOUNT_ID')
-
-# رسوم و تسعير
 DEPOSIT_FEE = 0.5
 WITHDRAW_FEE = 0.5
 USDT_RATE = 14000
 
-# ==================== قاعدة البيانات ====================
+bot = telebot.TeleBot(TOKEN)
+
+# ------------------ قاعدة البيانات ------------------
 def init_db():
     conn = sqlite3.connect('wallet.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    shamcash_balance REAL DEFAULT 0,
-                    usdt_balance REAL DEFAULT 0,
-                    shamcash_wallet TEXT,
-                    usdt_wallet TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    type TEXT,
-                    amount REAL,
-                    fee REAL,
-                    currency TEXT,
-                    status TEXT,
-                    date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id INTEGER PRIMARY KEY, 
+                  username TEXT,
+                  shamcash_balance REAL DEFAULT 0,
+                  usdt_balance REAL DEFAULT 0,
+                  shamcash_wallet TEXT,
+                  usdt_wallet TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS transactions
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  type TEXT,
+                  amount REAL,
+                  fee REAL,
+                  currency TEXT,
+                  status TEXT,
+                  date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -61,137 +43,79 @@ def db_execute(query, params=(), fetch=False):
     conn.close()
     return result
 
-# ==================== دوال التحويل ====================
-def send_usdt(to_address, amount):
-    """إرسال USDT عبر شبكة Tron"""
-    client = Tron(provider=HTTPProvider())
-    priv_key = PrivateKey(bytes.fromhex(TRON_PRIVATE_KEY))
-    contract = client.get_contract(USDT_CONTRACT)
-    txn = (
-        contract.functions.transfer(to_address, int(amount * 1_000_000))
-        .with_owner(TRON_WALLET_ADDRESS)
-        .fee_limit(1_000_000_000)
-        .build()
-        .sign(priv_key)
-    )
-    result = txn.broadcast()
-    if result.get('result'):
-        return result['txid']
-    else:
-        raise Exception(result.get('message', 'فشل إرسال USDT'))
-
-def send_shamcash(phone_number, amount):
-    """إرسال شام كاش إلى رقم هاتف"""
-    with ShamCashAPISync(api_token=SHAMCASH_API_TOKEN) as client:
-        # نرسل إلى رقم الهاتف مباشرة
-        transaction = client.send_to_phone(
-            account_id=SHAMCASH_ACCOUNT_ID,
-            phone=phone_number,
-            amount=amount
-        )
-        return transaction.id
-
-# ==================== البوت ====================
-bot = telebot.TeleBot(TOKEN)
 init_db()
 
-# ... (جميع أوامر /start, /balance, /help ... الخ كما هي)
-
-# ==================== نظام الإيداع ====================
-@bot.callback_query_handler(func=lambda call: call.data.startswith('dep_'))
-def process_deposit(call):
-    user_id = call.from_user.id
-    currency = 'USDT' if 'usdt' in call.data else 'شام كاش'
-
-    if currency == 'USDT':
-        # إيداع USDT
-        bot.edit_message_text(
-            f"📥 لإيداع {currency}، أرسل المبلغ إلى عنوان المحفظة التالي:\n\n"
-            f"`{TRON_WALLET_ADDRESS}`\n\n"
-            f"⚠️ العمولة: {DEPOSIT_FEE}$\n\n"
-            f"بعد إرسال المبلغ، أرسل لنا صورة الإيصال أو رابط العملية (txid).",
-            call.message.chat.id, call.message.message_id,
-            parse_mode='Markdown'
-        )
-    else:
-        # إيداع شام كاش
-        bot.edit_message_text(
-            f"📥 لإيداع {currency}، أرسل المبلغ إلى حساب الشام كاش التالي:\n\n"
-            f"رقم الحساب: `{SHAMCASH_ACCOUNT_ID}`\n\n"
-            f"⚠️ العمولة: {DEPOSIT_FEE}$\n\n"
-            f"بعد إرسال المبلغ، أرسل لنا صورة الإيصال.",
-            call.message.chat.id, call.message.message_id,
-            parse_mode='Markdown'
-        )
-
-# ... (معالجة الردود على الإيصالات في الـ handler القادم)
-
-# ==================== نظام السحب ====================
-# (يستخدم حالات البوت لتخزين البيانات المؤقتة)
-withdraw_data = {}
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('wit_'))
-def request_withdraw_details(call):
-    user_id = call.from_user.id
-    currency = 'USDT' if 'usdt' in call.data else 'شام كاش'
-
-    withdraw_data[user_id] = {'currency': currency}
-    msg = bot.edit_message_text(
-        f"📤 سحب {currency}\n\n"
-        f"أدخل المبلغ الذي ترغب في سحبه (بالدولار):",
-        call.message.chat.id, call.message.message_id
-    )
-    bot.register_next_step_handler(msg, process_withdraw_amount)
-
-def process_withdraw_amount(message):
+# ------------------ أوامر البوت الأساسية ------------------
+@bot.message_handler(commands=['start'])
+def start(message):
     user_id = message.from_user.id
-    try:
-        amount = float(message.text)
-    except ValueError:
-        bot.reply_to(message, "❌ الرجاء إدخال رقم صحيح.")
-        return
+    username = message.from_user.username or "بدون يوزر"
+    user = db_execute("SELECT user_id FROM users WHERE user_id=?", (user_id,), fetch=True)
+    if user is None:
+        db_execute("INSERT INTO users (user_id, username) VALUES (?,?)", (user_id, username))
+        welcome_text = "👋 أهلاً بك في بوت محفظة USDT ↔ شام كاش!\n\n"
+        welcome_text += "🎉 تم إنشاء حسابك.\n\n"
+        welcome_text += "📋 الأوامر المتاحة:\n"
+        welcome_text += "/balance - عرض رصيدك\n"
+        welcome_text += "/deposit - إيداع أموال\n"
+        welcome_text += "/withdraw - سحب أموال\n"
+        welcome_text += "/convert - تحويل عملات\n"
+        welcome_text += "/help - مساعدة"
+        bot.reply_to(message, welcome_text)
+    else:
+        bot.reply_to(message, "👋 أهلاً مجدداً!\nاكتب /balance لعرض رصيدك.")
 
-    data = withdraw_data.get(user_id, {})
-    currency = data.get('currency')
-
-    # تحقق من الرصيد
-    user = db_execute("SELECT usdt_balance, shamcash_balance FROM users WHERE user_id=?", (user_id,), fetch=True)
-    if not user:
+@bot.message_handler(commands=['balance'])
+def balance(message):
+    user_id = message.from_user.id
+    result = db_execute("SELECT shamcash_balance, usdt_balance FROM users WHERE user_id=?", (user_id,), fetch=True)
+    if result:
+        sham, usdt = result
+        balance_text = "💰 *رصيدك الحالي:*\n\n"
+        balance_text += f"💵 USDT: `{usdt:.2f}`\n"
+        balance_text += f"📱 شام كاش: `{sham:.2f}` ل.س\n\n"
+        balance_text += f"📊 سعر الصرف: 1 USDT = {USDT_RATE} ل.س"
+        bot.send_message(message.chat.id, balance_text, parse_mode="Markdown")
+    else:
         bot.reply_to(message, "❌ ليس لديك حساب. اكتب /start")
-        return
 
-    usdt_bal, sham_bal = user
+@bot.message_handler(commands=['help'])
+def help_cmd(message):
+    help_text = "ℹ️ *المساعدة*\n\n"
+    help_text += "🏦 *بوت محفظة USDT ↔ شام كاش*\n\n"
+    help_text += f"📌 *العمولات:*\n• إيداع: {DEPOSIT_FEE}$\n• سحب: {WITHDRAW_FEE}$\n\n"
+    help_text += "📋 *الأوامر:*\n/balance - الرصيد\n/deposit - إيداع\n/withdraw - سحب\n/convert - تحويل\n/help - مساعدة"
+    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
 
-    if currency == 'USDT' and usdt_bal >= amount:
-        # طلب عنوان USDT
-        msg = bot.reply_to(message, "📝 أدخل عنوان محفظة USDT (TRC-20) الذي ترغب في استلام المبلغ عليه:")
-        bot.register_next_step_handler(msg, process_withdraw_address, amount, currency)
-    elif currency == 'شام كاش' and sham_bal >= amount:
-        # طلب رقم هاتف شام كاش
-        msg = bot.reply_to(message, "📝 أدخل رقم هاتف شام كاش الذي ترغب في استلام المبلغ عليه:")
-        bot.register_next_step_handler(msg, process_withdraw_address, amount, currency)
-    else:
-        bot.reply_to(message, f"❌ رصيدك غير كافٍ. رصيد {currency}: {usdt_bal if currency == 'USDT' else sham_bal}")
+@bot.message_handler(commands=['deposit'])
+def deposit_menu(message):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    btn_usdt = telebot.types.InlineKeyboardButton("💵 USDT", callback_data="dep_usdt")
+    btn_sham = telebot.types.InlineKeyboardButton("📱 شام كاش", callback_data="dep_sham")
+    markup.add(btn_usdt, btn_sham)
+    bot.send_message(message.chat.id, "📥 اختر عملة الإيداع:\n\n⚠️ عمولة الإيداع: 0.5$", reply_markup=markup)
 
-def process_withdraw_address(message, amount, currency):
-    user_id = message.from_user.id
-    address = message.text.strip()
+@bot.message_handler(commands=['withdraw'])
+def withdraw_menu(message):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    btn_usdt = telebot.types.InlineKeyboardButton("💵 USDT", callback_data="wit_usdt")
+    btn_sham = telebot.types.InlineKeyboardButton("📱 شام كاش", callback_data="wit_sham")
+    markup.add(btn_usdt, btn_sham)
+    bot.send_message(message.chat.id, "📤 اختر عملة السحب:\n\n⚠️ عمولة السحب: 0.5$", reply_markup=markup)
 
-    # تنفيذ التحويل
-    try:
-        if currency == 'USDT':
-            txid = send_usdt(address, amount - WITHDRAW_FEE)
-            # خصم من الرصيد
-            db_execute("UPDATE users SET usdt_balance = usdt_balance - ? WHERE user_id=?", (amount, user_id))
-            bot.reply_to(message, f"✅ تم سحب {amount - WITHDRAW_FEE} USDT بنجاح.\nرقم العملية: `{txid}`")
-        else:
-            txid = send_shamcash(address, amount - WITHDRAW_FEE)
-            db_execute("UPDATE users SET shamcash_balance = shamcash_balance - ? WHERE user_id=?", (amount, user_id))
-            bot.reply_to(message, f"✅ تم سحب {amount - WITHDRAW_FEE} شام كاش بنجاح.\nرقم العملية: `{txid}`")
-    except Exception as e:
-        bot.reply_to(message, f"❌ فشل السحب: {str(e)}")
+@bot.message_handler(commands=['convert'])
+def convert_menu(message):
+    markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        telebot.types.InlineKeyboardButton("💵 USDT → 📱 شام كاش", callback_data="conv_u2s"),
+        telebot.types.InlineKeyboardButton("📱 شام كاش → 💵 USDT", callback_data="conv_s2u")
+    )
+    bot.send_message(message.chat.id, "🔄 اختر اتجاه التحويل:", reply_markup=markup)
 
-# ... (باقي الأوامر ونظام التحويل)
+@bot.callback_query_handler(func=lambda call: True)
+def handle_buttons(call):
+    bot.answer_callback_query(call.id, "الميزة غير مفعلة بعد ⚠️")
 
+# ------------------ تشغيل البوت ------------------
 print("✅ البوت يعمل الآن على السيرفر...")
 bot.polling(non_stop=True)
